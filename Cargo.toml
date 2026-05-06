@@ -1,0 +1,14 @@
+[package]
+name = "hyperkeyd"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny Hyper-key command dispatcher daemon for Linux evdev"
+license = "GPL-3.0-or-later"
+authors = ["W. D. Callahan II"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+evdev = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

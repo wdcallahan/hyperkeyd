@@ -1,0 +1,21 @@
+# Example udev rule for granting the active local user access to one keyboard.
+#
+# DO NOT install this blindly. First identify your keyboard with:
+#
+#   udevadm info --attribute-walk --name=/dev/input/eventX
+#
+# Then replace "REPLACE ME KEYBOARD NAME" with a stable ATTRS{name} value for
+# the keyboard you actually want hyperkeyd to read.
+#
+# Install as root, for example:
+#
+#   sudo cp contrib/99-hyperkeyd-keyboard.rules.example /etc/udev/rules.d/99-hyperkeyd-keyboard.rules
+#   sudoedit /etc/udev/rules.d/99-hyperkeyd-keyboard.rules
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# TAG+="uaccess" asks logind/udev to grant the active local session user access
+# to the matching device node. This is usually preferable to running hyperkeyd as
+# root, because hyperkeyd launches user-owned scripts.
+
+SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", ATTRS{name}=="REPLACE ME KEYBOARD NAME", TAG+="uaccess"

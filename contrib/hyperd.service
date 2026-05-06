@@ -1,0 +1,35 @@
+# Example systemd --user service for hyperkeyd.
+#
+# Install as:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/hyperkeyd.service ~/.config/systemd/user/hyperkeyd.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hyperkeyd.service
+#   journalctl --user -u hyperkeyd.service -f
+#
+# Before enabling, edit ExecStart so the --device path and --hyper-key match
+# your keyboard setup. Prefer stable /dev/input/by-id/ symlinks when available.
+
+[Unit]
+Description=Hyper key command dispatcher
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=RUST_LOG=hyperkeyd=info
+ExecStart=%h/.local/bin/hyperkeyd --device /dev/input/by-id/REPLACE-ME-kbd --hyper-key KEY_F24 --script-dir %h/.hyper
+Restart=on-failure
+RestartSec=2s
+
+# Keep the daemon from gaining new privileges after startup.
+# This does not grant input access; it only prevents privilege escalation.
+NoNewPrivileges=yes
+
+# The daemon does not need a usable stdin. Scripts launched by the daemon also
+# inherit this closed/null stdin unless they deliberately reopen something else.
+StandardInput=null
+
+[Install]
+WantedBy=default.target
