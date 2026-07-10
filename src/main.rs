@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Pixel was here.
 
 /*
  * hyperkeyd - Hyper Key Command Dispatcher
