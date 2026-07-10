@@ -11,7 +11,7 @@ Hyper + 1        -> ~/.hyper/1.sh
 Hyper up         -> dispatcher idle
 ```
 
-There are no sequences, no prefixes, no command buffers, and no timing rules. Every recognized keydown while armed is a complete command event.
+There are no sequences, no prefixes, no command buffers, and no timing rules. Every physical alphanumeric key press while armed is a complete command event. Kernel-generated key-repeat events are always ignored: holding a command key launches it once. To launch it again, release and press that command key again; Hyper may remain held the entire time.
 
 ## Why evdev?
 
@@ -33,6 +33,8 @@ For clean behavior, the Hyper trigger should be set up so that holding it does n
 - or accepting passive-listener behavior during testing with `--dry-run`.
 
 If you bind Hyper to a plain non-modifier key such as `KEY_F24`, then pressing `F24+a` may still send `a` to the active application unless your desktop/keymap treats that trigger as a modifier or otherwise consumes it.
+
+If the matching command script does not exist, `hyperkeyd` silently takes no action. Because version 0.1 is only a listener, the presence or absence of a script does not determine whether the desktop also receives the command letter. Empty default scripts would not suppress those desktop key events.
 
 ## Build
 
@@ -137,10 +139,6 @@ Then hold Hyper and press `a`.
 --log-missing
     Log missing scripts instead of silently ignoring them.
 
---suppress-repeat
-    Ignore evdev key-repeat events.
-    By default, repeat events dispatch commands.
-
 --dry-run
     Log what would launch without executing scripts.
 ```
@@ -154,7 +152,7 @@ HYPERKEYD_KEY
     The command character, such as a or 1.
 
 HYPERKEYD_EVENT
-    press or repeat.
+    press.
 
 HYPERKEYD_DEVICE
     The evdev device path that produced the command key event.
@@ -177,7 +175,7 @@ For the first personal version, the simplest approach is usually to grant your u
 A udev-rule example is provided in:
 
 ```text
-contrib/99-hyperkeyd-keyboard.rules.example
+contrib/72-hyperkeyd-keyboard.rules.example
 ```
 
 A template service is provided in:
@@ -225,6 +223,12 @@ key event -> executable script
 ```
 
 Everything action-specific belongs in the scripts.
+
+## Development provenance
+
+`hyperkeyd` is developed openly as a collaboration between W. D. Callahan II and Pixel, the OpenAI assistant working with him through ChatGPT Work. Commits containing code written directly by Pixel carry a `Pixel-Authored-By` trailer naming the Pixel version and a `Human-Directed-By` trailer naming the person who requested and accepted the work.
+
+These trailers preserve who typed each change instead of concealing the use of AI. Human and assistant both remain accountable for reviewing, testing, and learning from the result.
 
 ## License
 

@@ -1,5 +1,8 @@
 # Example udev rule for granting the active local user access to one keyboard.
 #
+# The 72- prefix is intentional. systemd's 73-seat-late.rules consumes the
+# uaccess tag and applies the active user's ACL, so this rule must run first.
+#
 # DO NOT install this blindly. First identify your keyboard with:
 #
 #   udevadm info --attribute-walk --name=/dev/input/eventX
@@ -9,10 +12,10 @@
 #
 # Install as root, for example:
 #
-#   sudo cp contrib/99-hyperkeyd-keyboard.rules.example /etc/udev/rules.d/99-hyperkeyd-keyboard.rules
-#   sudoedit /etc/udev/rules.d/99-hyperkeyd-keyboard.rules
+#   sudo cp contrib/72-hyperkeyd-keyboard.rules.example /etc/udev/rules.d/72-hyperkeyd-keyboard.rules
+#   sudoedit /etc/udev/rules.d/72-hyperkeyd-keyboard.rules
 #   sudo udevadm control --reload-rules
-#   sudo udevadm trigger
+#   sudo udevadm trigger --subsystem-match=input
 #
 # TAG+="uaccess" asks logind/udev to grant the active local session user access
 # to the matching device node. This is usually preferable to running hyperkeyd as

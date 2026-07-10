@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Pixel was here.
+// Pixel was here. Pixel-written changes are identified by Pixel-Authored-By commit trailers.
 
 /*
  * hyperkeyd - Hyper Key Command Dispatcher
@@ -31,6 +31,8 @@
 //!   directory, such as `~/.hyper/a.sh` or `~/.hyper/1.sh`.
 //! - Commands are launched immediately. There is no command buffer, no prefix
 //!   grammar, no timeout, and no waiting for a possible second key.
+//! - Kernel-generated key-repeat events are always ignored. Each additional
+//!   launch requires another physical press of the command key.
 //!
 //! The implementation deliberately uses Linux evdev instead of X11 hotkey APIs.
 //! That makes the event source independent of X11 and Wayland compositors, at
@@ -39,16 +41,21 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use evdev::{Device, EventSummary, KeyCode};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const DEVICE_RETRY_DELAY: Duration = Duration::from_secs(2);
+const CHILD_REAPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Command line arguments for the daemon.
 ///
@@ -60,7 +67,12 @@ use tracing_subscriber::EnvFilter;
 /// - `.sh` is the default script extension because the design document used
 ///   examples such as `a.sh` and `1.sh`.
 #[derive(Debug, Parser)]
-#[command(author, version, about)]
+#[command(
+    author,
+    version,
+    about = "A small Hyper-key command dispatcher for Linux evdev",
+    long_about = None
+)]
 struct Args {
     /// Print evdev input devices and exit.
     ///
@@ -106,14 +118,6 @@ struct Args {
     #[arg(long)]
     log_missing: bool,
 
-    /// Suppress key-repeat dispatches.
-    ///
-    /// By default, evdev repeat events dispatch commands, matching the core
-    /// design: recognized keydown while armed means dispatch. This flag is an
-    /// optional implementation convenience, not part of the semantic contract.
-    #[arg(long)]
-    suppress_repeat: bool,
-
     /// Do not actually launch scripts; only log what would be launched.
     ///
     /// This is useful while selecting devices, choosing the Hyper key, or
@@ -132,7 +136,6 @@ struct Config {
     script_dir: PathBuf,
     extension: String,
     log_missing: bool,
-    suppress_repeat: bool,
     dry_run: bool,
 }
 
@@ -145,6 +148,21 @@ struct KeyEvent {
     device_path: PathBuf,
     key: KeyCode,
     value: KeyValue,
+}
+
+/// Messages sent from input-listener threads to the central dispatcher.
+#[derive(Debug, Clone)]
+enum InputMessage {
+    Key(KeyEvent),
+    DeviceUnavailable { device_path: PathBuf },
+}
+
+/// A launched command retained until its exit status has been collected.
+#[derive(Debug)]
+struct RunningChild {
+    child: Child,
+    script_path: PathBuf,
+    command_char: char,
 }
 
 /// The only key values the dispatcher cares about.
@@ -174,15 +192,6 @@ impl KeyValue {
             other => Self::Other(other),
         }
     }
-
-    fn as_env_value(self) -> &'static str {
-        match self {
-            Self::Release => "release",
-            Self::Press => "press",
-            Self::Repeat => "repeat",
-            Self::Other(_) => "other",
-        }
-    }
 }
 
 /// The complete semantic state machine for the daemon.
@@ -197,16 +206,22 @@ impl KeyValue {
 /// see whether another key follows.
 #[derive(Debug)]
 struct Dispatcher {
-    armed: bool,
+    hyper_devices: HashSet<PathBuf>,
     config: Config,
+    child_tx: Sender<RunningChild>,
 }
 
 impl Dispatcher {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, child_tx: Sender<RunningChild>) -> Self {
         Self {
-            armed: false,
+            hyper_devices: HashSet::new(),
             config,
+            child_tx,
         }
+    }
+
+    fn is_armed(&self) -> bool {
+        !self.hyper_devices.is_empty()
     }
 
     /// Handle one normalized key event.
@@ -223,12 +238,12 @@ impl Dispatcher {
             return;
         }
 
-        if !self.armed {
+        if !self.is_armed() {
             // While idle, ordinary keys are outside this daemon's domain.
             return;
         }
 
-        if !self.should_dispatch_for_value(event.value) {
+        if !Self::should_dispatch_for_value(event.value) {
             return;
         }
 
@@ -241,23 +256,22 @@ impl Dispatcher {
             return;
         };
 
-        self.dispatch(command_char, event.value, &event.device_path);
+        self.dispatch(command_char, &event.device_path);
     }
 
     /// Update the armed state when the configured Hyper key changes state.
     fn handle_hyper_event(&mut self, value: KeyValue, device_path: &Path) {
         match value {
             KeyValue::Press => {
-                if !self.armed {
+                let was_idle = !self.is_armed();
+                if self.hyper_devices.insert(device_path.to_path_buf()) && was_idle {
                     info!(device = %device_path.display(), "Hyper pressed; dispatcher armed");
                 }
-                self.armed = true;
             }
             KeyValue::Release => {
-                if self.armed {
+                if self.hyper_devices.remove(device_path) && !self.is_armed() {
                     info!(device = %device_path.display(), "Hyper released; dispatcher idle");
                 }
-                self.armed = false;
             }
             KeyValue::Repeat => {
                 // A repeated Hyper key does not change the state machine.
@@ -273,17 +287,32 @@ impl Dispatcher {
         }
     }
 
+    /// Clear any held-Hyper state belonging to an unavailable input device.
+    fn handle_device_unavailable(&mut self, device_path: &Path) {
+        if !self.hyper_devices.remove(device_path) {
+            return;
+        }
+
+        if self.is_armed() {
+            warn!(
+                device = %device_path.display(),
+                "input device became unavailable while Hyper was held; dispatcher remains armed by another device"
+            );
+        } else {
+            warn!(
+                device = %device_path.display(),
+                "input device became unavailable while Hyper was held; dispatcher forced idle"
+            );
+        }
+    }
+
     /// Decide whether a key event value counts as a command dispatch.
     ///
-    /// Press always dispatches. Repeat dispatches by default because the core
-    /// model says each recognized keydown event while armed is a command event.
-    /// Release never dispatches.
-    fn should_dispatch_for_value(&self, value: KeyValue) -> bool {
-        match value {
-            KeyValue::Press => true,
-            KeyValue::Repeat => !self.config.suppress_repeat,
-            KeyValue::Release | KeyValue::Other(_) => false,
-        }
+    /// Only a physical press dispatches. Kernel-generated repeat events are
+    /// always ignored. Hyper may remain held while the command key is released
+    /// and pressed again for each additional launch.
+    fn should_dispatch_for_value(value: KeyValue) -> bool {
+        matches!(value, KeyValue::Press)
     }
 
     /// Launch the matching script for a command character.
@@ -292,7 +321,7 @@ impl Dispatcher {
     /// directly. That avoids shell quoting bugs and avoids treating any input as
     /// a command string. The user's script may itself be a shell script, Python
     /// script, compiled binary, or anything else executable by the kernel.
-    fn dispatch(&self, command_char: char, value: KeyValue, device_path: &Path) {
+    fn dispatch(&self, command_char: char, device_path: &Path) {
         let script_path = script_path_for(
             &self.config.script_dir,
             command_char,
@@ -327,15 +356,40 @@ impl Dispatcher {
                 // model, but they are useful for scripts that want context.
                 command
                     .env("HYPERKEYD_KEY", command_char.to_string())
-                    .env("HYPERKEYD_EVENT", value.as_env_value())
+                    .env("HYPERKEYD_EVENT", "press")
                     .env("HYPERKEYD_DEVICE", device_path.as_os_str());
 
-                if let Err(err) = command.spawn() {
-                    error!(
-                        error = %err,
-                        script = %script_path.display(),
-                        "failed to launch script"
-                    );
+                match command.spawn() {
+                    Ok(child) => {
+                        let running = RunningChild {
+                            child,
+                            script_path: script_path.clone(),
+                            command_char,
+                        };
+
+                        if let Err(send_error) = self.child_tx.send(running) {
+                            let mut running = send_error.0;
+                            error!(
+                                script = %running.script_path.display(),
+                                "child reaper unavailable; waiting for script in dispatcher"
+                            );
+
+                            if let Err(err) = running.child.wait() {
+                                error!(
+                                    error = %err,
+                                    script = %running.script_path.display(),
+                                    "failed to collect script exit status"
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error!(
+                            error = %err,
+                            script = %script_path.display(),
+                            "failed to launch script"
+                        );
+                    }
                 }
             }
             Ok(ExecutableStatus::Missing) => {
@@ -410,16 +464,21 @@ fn main() -> Result<()> {
         script_dir,
         extension: normalize_extension(&args.extension),
         log_missing: args.log_missing,
-        suppress_repeat: args.suppress_repeat,
         dry_run: args.dry_run,
     };
 
     info!(hyper_key = ?config.hyper_key, script_dir = %config.script_dir.display(), "starting hyperkeyd");
 
-    let (tx, rx) = mpsc::channel::<KeyEvent>();
+    let child_tx = spawn_child_reaper()?;
+    let (tx, rx) = mpsc::channel::<InputMessage>();
     let mut handles = Vec::new();
+    let mut seen_devices = HashSet::new();
 
     for path in args.device {
+        if !seen_devices.insert(path.clone()) {
+            warn!(device = %path.display(), "duplicate input device ignored");
+            continue;
+        }
         handles.push(spawn_device_listener(path, tx.clone()));
     }
 
@@ -428,7 +487,7 @@ fn main() -> Result<()> {
     // had ended.
     drop(tx);
 
-    run_dispatch_loop(config, rx);
+    let dispatch_result = run_dispatch_loop(config, child_tx, rx);
 
     // If the dispatch loop exits, every listener has stopped. Joining gives the
     // threads a chance to finish cleanly before main returns.
@@ -438,8 +497,7 @@ fn main() -> Result<()> {
         }
     }
 
-    warn!("all device listeners stopped; hyperkeyd exiting");
-    Ok(())
+    dispatch_result
 }
 
 /// Initialize logging.
@@ -452,7 +510,8 @@ fn main() -> Result<()> {
 ///
 ///     RUST_LOG=hyperkeyd=debug hyperkeyd --device /dev/input/event7 --dry-run
 fn init_logging() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("hyperkeyd=info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("hyperkeyd=info"));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -464,12 +523,95 @@ fn init_logging() {
 ///
 /// Device threads do blocking reads from evdev and send normalized key events to
 /// this loop. Keeping the state machine in one thread avoids locks: only this
-/// function owns and mutates `Dispatcher::armed`.
-fn run_dispatch_loop(config: Config, rx: Receiver<KeyEvent>) {
-    let mut dispatcher = Dispatcher::new(config);
+/// function owns and mutates the set of devices currently holding Hyper.
+fn run_dispatch_loop(
+    config: Config,
+    child_tx: Sender<RunningChild>,
+    rx: Receiver<InputMessage>,
+) -> Result<()> {
+    let mut dispatcher = Dispatcher::new(config, child_tx);
 
-    while let Ok(event) = rx.recv() {
-        dispatcher.handle_event(event);
+    while let Ok(message) = rx.recv() {
+        match message {
+            InputMessage::Key(event) => dispatcher.handle_event(event),
+            InputMessage::DeviceUnavailable { device_path } => {
+                dispatcher.handle_device_unavailable(&device_path)
+            }
+        }
+    }
+
+    bail!("all device listener channels closed unexpectedly")
+}
+
+/// Start a background worker that retains and reaps every launched child.
+fn spawn_child_reaper() -> Result<Sender<RunningChild>> {
+    let (tx, rx) = mpsc::channel::<RunningChild>();
+
+    thread::Builder::new()
+        .name("hyperkeyd-child-reaper".to_string())
+        .spawn(move || child_reaper_loop(rx))
+        .context("failed to start child reaper thread")?;
+
+    Ok(tx)
+}
+
+fn child_reaper_loop(rx: Receiver<RunningChild>) {
+    let mut children = Vec::new();
+    let mut disconnected = false;
+
+    loop {
+        if !disconnected {
+            match rx.recv_timeout(CHILD_REAPER_POLL_INTERVAL) {
+                Ok(child) => children.push(child),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => disconnected = true,
+            }
+        } else if !children.is_empty() {
+            thread::sleep(CHILD_REAPER_POLL_INTERVAL);
+        }
+
+        reap_finished_children(&mut children);
+
+        if disconnected && children.is_empty() {
+            return;
+        }
+    }
+}
+
+fn reap_finished_children(children: &mut Vec<RunningChild>) {
+    let mut index = 0;
+
+    while index < children.len() {
+        match children[index].child.try_wait() {
+            Ok(Some(status)) => {
+                let running = children.swap_remove(index);
+                if status.success() {
+                    debug!(
+                        key = %running.command_char,
+                        script = %running.script_path.display(),
+                        %status,
+                        "script exited"
+                    );
+                } else {
+                    warn!(
+                        key = %running.command_char,
+                        script = %running.script_path.display(),
+                        %status,
+                        "script exited unsuccessfully"
+                    );
+                }
+            }
+            Ok(None) => index += 1,
+            Err(err) => {
+                let running = children.swap_remove(index);
+                warn!(
+                    error = %err,
+                    key = %running.command_char,
+                    script = %running.script_path.display(),
+                    "failed to collect script exit status"
+                );
+            }
+        }
     }
 }
 
@@ -478,16 +620,35 @@ fn run_dispatch_loop(config: Config, rx: Receiver<KeyEvent>) {
 /// A thread-per-device model is deliberately simple. We do not need an async
 /// runtime because the daemon watches only a small number of devices, and each
 /// listener spends almost all of its time blocked in `fetch_events()`.
-fn spawn_device_listener(path: PathBuf, tx: Sender<KeyEvent>) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        if let Err(err) = device_listener_loop(path.clone(), tx) {
-            error!(device = %path.display(), error = %err, "device listener stopped");
+fn spawn_device_listener(path: PathBuf, tx: Sender<InputMessage>) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        match device_listener_loop(&path, &tx) {
+            Ok(()) => return,
+            Err(err) => {
+                error!(device = %path.display(), error = %err, "input device unavailable");
+
+                if tx
+                    .send(InputMessage::DeviceUnavailable {
+                        device_path: path.clone(),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+
+                warn!(
+                    device = %path.display(),
+                    retry_seconds = DEVICE_RETRY_DELAY.as_secs(),
+                    "will retry input device"
+                );
+                thread::sleep(DEVICE_RETRY_DELAY);
+            }
         }
     })
 }
 
-fn device_listener_loop(path: PathBuf, tx: Sender<KeyEvent>) -> Result<()> {
-    let mut device = Device::open(&path)
+fn device_listener_loop(path: &Path, tx: &Sender<InputMessage>) -> Result<()> {
+    let mut device = Device::open(path)
         .with_context(|| format!("failed to open evdev device {}", path.display()))?;
 
     let device_name = device.name().unwrap_or("unnamed device").to_string();
@@ -501,12 +662,12 @@ fn device_listener_loop(path: PathBuf, tx: Sender<KeyEvent>) -> Result<()> {
         for event in events {
             if let EventSummary::Key(_, key, raw_value) = event.destructure() {
                 let key_event = KeyEvent {
-                    device_path: path.clone(),
+                    device_path: path.to_path_buf(),
                     key,
                     value: KeyValue::from_evdev_value(raw_value),
                 };
 
-                if tx.send(key_event).is_err() {
+                if tx.send(InputMessage::Key(key_event)).is_err() {
                     // The receiver exits only when the daemon is shutting down.
                     // Once it is gone, this listener has no useful work left.
                     return Ok(());
@@ -532,7 +693,11 @@ fn list_devices() {
             .map(|keys| keys.contains(KeyCode::KEY_A) && keys.contains(KeyCode::KEY_Z))
             .unwrap_or(false);
 
-        let marker = if looks_keyboard { "keyboard-ish" } else { "input" };
+        let marker = if looks_keyboard {
+            "keyboard-ish"
+        } else {
+            "input"
+        };
         println!("{}\t{}\t{}", path.display(), marker, name);
     }
 }
@@ -574,7 +739,9 @@ fn executable_status(path: &Path) -> Result<ExecutableStatus> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ExecutableStatus::Missing);
         }
-        Err(err) => return Err(err).with_context(|| format!("metadata failed for {}", path.display())),
+        Err(err) => {
+            return Err(err).with_context(|| format!("metadata failed for {}", path.display()))
+        }
     };
 
     if !metadata.is_file() {
@@ -673,6 +840,19 @@ fn command_char_for_key(key: KeyCode) -> Option<char> {
 mod tests {
     use super::*;
 
+    fn test_dispatcher() -> Dispatcher {
+        let config = Config {
+            hyper_key: KeyCode::KEY_F24,
+            script_dir: PathBuf::from("/definitely/missing/hyperkeyd-test-scripts"),
+            extension: "sh".to_string(),
+            log_missing: false,
+            dry_run: true,
+        };
+        let (child_tx, _child_rx) = mpsc::channel();
+
+        Dispatcher::new(config, child_tx)
+    }
+
     #[test]
     fn command_keys_are_lowercase_letters_and_digits() {
         assert_eq!(command_char_for_key(KeyCode::KEY_A), Some('a'));
@@ -701,5 +881,123 @@ mod tests {
         assert_eq!(parse_key_code("KEY_F24").unwrap(), KeyCode::KEY_F24);
         assert_eq!(parse_key_code("F24").unwrap(), KeyCode::KEY_F24);
         assert_eq!(parse_key_code("capslock").unwrap(), KeyCode::KEY_CAPSLOCK);
+    }
+
+    #[test]
+    fn only_physical_presses_dispatch() {
+        assert!(Dispatcher::should_dispatch_for_value(KeyValue::Press));
+        assert!(!Dispatcher::should_dispatch_for_value(KeyValue::Repeat));
+        assert!(!Dispatcher::should_dispatch_for_value(KeyValue::Release));
+        assert!(!Dispatcher::should_dispatch_for_value(KeyValue::Other(3)));
+    }
+
+    #[test]
+    fn held_command_key_launches_once_but_separate_presses_launch_again() {
+        let script_dir =
+            env::temp_dir().join(format!("hyperkeyd-repeat-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&script_dir);
+        fs::create_dir_all(&script_dir).unwrap();
+        std::os::unix::fs::symlink("/bin/true", script_dir.join("q.sh")).unwrap();
+
+        let config = Config {
+            hyper_key: KeyCode::KEY_F24,
+            script_dir: script_dir.clone(),
+            extension: "sh".to_string(),
+            log_missing: false,
+            dry_run: false,
+        };
+        let (child_tx, child_rx) = mpsc::channel();
+        let mut dispatcher = Dispatcher::new(config, child_tx);
+        let device_path = PathBuf::from("/dev/input/test-keyboard");
+
+        dispatcher.handle_event(KeyEvent {
+            device_path: device_path.clone(),
+            key: KeyCode::KEY_F24,
+            value: KeyValue::Press,
+        });
+        dispatcher.handle_event(KeyEvent {
+            device_path: device_path.clone(),
+            key: KeyCode::KEY_Q,
+            value: KeyValue::Press,
+        });
+        for _ in 0..20 {
+            dispatcher.handle_event(KeyEvent {
+                device_path: device_path.clone(),
+                key: KeyCode::KEY_Q,
+                value: KeyValue::Repeat,
+            });
+        }
+
+        let mut first = child_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the physical press should launch q.sh");
+        first.child.wait().unwrap();
+        assert!(child_rx.try_recv().is_err());
+
+        dispatcher.handle_event(KeyEvent {
+            device_path: device_path.clone(),
+            key: KeyCode::KEY_Q,
+            value: KeyValue::Release,
+        });
+        dispatcher.handle_event(KeyEvent {
+            device_path,
+            key: KeyCode::KEY_Q,
+            value: KeyValue::Press,
+        });
+
+        let mut second = child_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a second physical press should launch q.sh again");
+        second.child.wait().unwrap();
+        assert!(child_rx.try_recv().is_err());
+
+        fs::remove_dir_all(script_dir).unwrap();
+    }
+
+    #[test]
+    fn hyper_remains_armed_until_every_holding_device_releases() {
+        let mut dispatcher = test_dispatcher();
+        let first = Path::new("/dev/input/first");
+        let second = Path::new("/dev/input/second");
+
+        dispatcher.handle_hyper_event(KeyValue::Press, first);
+        dispatcher.handle_hyper_event(KeyValue::Press, second);
+        dispatcher.handle_hyper_event(KeyValue::Release, first);
+        assert!(dispatcher.is_armed());
+
+        dispatcher.handle_hyper_event(KeyValue::Release, second);
+        assert!(!dispatcher.is_armed());
+    }
+
+    #[test]
+    fn unavailable_device_clears_its_held_hyper_state() {
+        let mut dispatcher = test_dispatcher();
+        let device = Path::new("/dev/input/disconnected");
+
+        dispatcher.handle_hyper_event(KeyValue::Press, device);
+        assert!(dispatcher.is_armed());
+
+        dispatcher.handle_device_unavailable(device);
+        assert!(!dispatcher.is_armed());
+    }
+
+    #[test]
+    fn finished_children_are_reaped() {
+        let child = Command::new("/bin/true").spawn().unwrap();
+        let mut children = vec![RunningChild {
+            child,
+            script_path: PathBuf::from("/bin/true"),
+            command_char: 't',
+        }];
+
+        for _ in 0..100 {
+            reap_finished_children(&mut children);
+            if children.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(children.is_empty());
     }
 }
