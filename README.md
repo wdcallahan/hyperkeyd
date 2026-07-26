@@ -36,6 +36,24 @@ If you bind Hyper to a plain non-modifier key such as `KEY_F24`, then pressing `
 
 If the matching command script does not exist, `hyperkeyd` silently takes no action. Because version 0.1 is only a listener, the presence or absence of a script does not determine whether the desktop also receives the command letter. Empty default scripts would not suppress those desktop key events.
 
+## Nova keyboard integration status
+
+`hyperkeyd` is currently an experimental component, not a production-critical
+part of MACE's accepted keyboard state. Its generic default remains
+`KEY_F24`.
+
+Nova's physical Hyper position now emits `PB_11`, which Linux exposes below
+XKB as `KEY_MACRO11`; XKB separately names the same transport `Hyper_L`. A
+test against the current board should therefore use
+`--hyper-key KEY_MACRO11`, because this daemon listens at evdev and never sees
+the later XKB keysym.
+
+The canonical whole-system status and boundaries live in
+[`x1_keyboard_layout`](https://github.com/wdcallahan/x1_keyboard_layout):
+
+- [guided tour](https://github.com/wdcallahan/x1_keyboard_layout/blob/main/docs/nova-keyboard-input-architecture.md)
+- [technical architecture](https://github.com/wdcallahan/x1_keyboard_layout/blob/main/docs/keyboard-architecture.md)
+
 ## Build
 
 ```bash
@@ -81,10 +99,7 @@ Then use that stable path with `--device`.
 Start with `--dry-run` so no scripts are launched yet:
 
 ```bash
-RUST_LOG=hyperkeyd=debug hyperkeyd \
-  --device /dev/input/event7 \
-  --hyper-key KEY_F24 \
-  --dry-run
+RUST_LOG=hyperkeyd=debug hyperkeyd --device /dev/input/event7 --hyper-key KEY_F24 --dry-run
 ```
 
 Press and hold your configured Hyper key, then press `a`, `b`, or a digit. You should see log messages showing which script would have launched.
