@@ -54,6 +54,12 @@ for those canonical Linux names. `KEY_MACRO11` maps to kernel keycode `0x29a`
 (decimal `666`). The crate's debug formatter may still display that value as
 `unknown key: 666`; that display does not mean parsing failed.
 
+Interactive `hyperkeyd setup` enrollment has been hardware-proven against the
+current Lemokey X2. It independently discovers the X2's split Hyper and command
+streams from physical keypresses, resolves both to stable `/dev/input/by-id/`
+paths, verifies a complete Hyper+A chord, and writes the resulting machine
+configuration.
+
 The canonical whole-system status and boundaries live in
 [`x1_keyboard_layout`](https://github.com/wdcallahan/x1_keyboard_layout):
 
@@ -78,9 +84,53 @@ Install it somewhere in your user path, for example:
 install -Dm755 target/release/hyperkeyd ~/.local/bin/hyperkeyd
 ```
 
-## Find your keyboard device
+## Enroll a keyboard
 
-Run:
+The normal machine-enrollment path is the interactive setup wizard:
+
+```bash
+hyperkeyd setup
+```
+
+Setup observes readable evdev key-event streams passively; it does not grab the
+keyboard. The wizard asks you to identify the intended Hyper key with a physical
+keypress, then asks for the physical `A` key so it can discover the command-key
+stream. This works with both ordinary single-stream keyboards and split-interface
+keyboards where Hyper and normal typing arrive on different evdev devices.
+
+After discovery, setup resolves the observed `/dev/input/eventN` nodes to stable
+`/dev/input/by-id/` aliases. It deliberately refuses to persist a volatile event
+number, and it also refuses to choose silently if an observed device has multiple
+stable aliases.
+
+Before writing anything, setup verifies the enrollment on those stable paths. It
+guides the verification one physical action at a time:
+
+```text
+hold Hyper
+press and release A
+release Hyper
+```
+
+There is no verification timeout. If Hyper is released too early, setup explains
+what happened and restarts only the verification sequence.
+
+Only after successful verification does setup atomically write:
+
+```text
+~/.config/hyperkeyd/config.toml
+```
+
+The write uses a same-directory temporary file followed by rename, so a partial
+configuration is not installed. `script_dir` is intentionally omitted from the
+generated file; the runtime therefore keeps its normal `$HOME/.hyper` default.
+
+Running `hyperkeyd setup` is an explicit re-enrollment operation. When you replace
+a keyboard or intentionally choose a different Hyper key, run setup again.
+
+## Inspect keyboard devices manually
+
+For troubleshooting or manual configuration, run:
 
 ```bash
 hyperkeyd --list-devices
@@ -98,11 +148,11 @@ For a systemd service, prefer a stable symlink under `/dev/input/by-id/` if your
 ls -l /dev/input/by-id/
 ```
 
-Then use that stable path with `--device` or store it in a machine configuration file.
+Then use that stable path with `--device` or store it in a machine configuration file. Do not treat advertised key capabilities alone as proof that a particular physical key emits on that stream; `hyperkeyd setup` observes the actual physical keypresses for that reason.
 
 ## Machine configuration file
 
-Machine-specific keyboard enrollment can be stored in a TOML file and loaded with `--config`.
+`hyperkeyd setup` is the recommended way to create machine-specific configuration, but the TOML format can also be written or maintained manually and loaded with `--config`.
 
 A split-interface keyboard may need more than one evdev stream: one device can carry the Hyper transport while another carries ordinary command keys. List every required stable device path:
 
@@ -184,6 +234,11 @@ Then hold Hyper and press `a`.
 ## CLI reference
 
 ```text
+setup
+    Interactively discover the physical Hyper and command-key streams,
+    resolve stable device paths, verify Hyper+A, and atomically write the
+    default machine configuration file.
+
 --list-devices
     Print evdev input devices and exit.
 
@@ -262,7 +317,7 @@ mkdir -p ~/.config/systemd/user
 cp contrib/hyperkeyd.service ~/.config/systemd/user/hyperkeyd.service
 ```
 
-The current template still passes machine-specific values on `ExecStart=`. Edit that line so `--device` and `--hyper-key` match your system. A later installer slice will migrate the managed service to `--config` after enrollment support is in place.
+The current template still passes machine-specific values on `ExecStart=`. Edit that line so `--device` and `--hyper-key` match your system. The installer slice will migrate the managed service to `--config` while preserving machine-local enrollment.
 
 Then enable it:
 
