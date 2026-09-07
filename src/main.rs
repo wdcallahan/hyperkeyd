@@ -38,6 +38,8 @@
 //! That makes the event source independent of X11 and Wayland compositors, at
 //! the cost of needing permission to read `/dev/input/event*` devices.
 
+mod setup;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use evdev::{Device, EventSummary, KeyCode};
@@ -478,7 +480,7 @@ fn load_file_config(path: &Path) -> Result<FileConfig> {
 }
 
 fn run_setup() -> Result<()> {
-    bail!("interactive setup enrollment is not implemented yet")
+    setup::run()
 }
 
 fn main() -> Result<()> {
