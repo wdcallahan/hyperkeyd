@@ -6,3 +6,7 @@ hyperkeyd_binary_path: "{{ hyperkeyd_install_dir }}/hyperkeyd"
 hyperkeyd_script_dir: "{{ hyperkeyd_home }}/.hyper"
 hyperkeyd_config_dir: "{{ hyperkeyd_home }}/.config/hyperkeyd"
 hyperkeyd_config_path: "{{ hyperkeyd_config_dir }}/config.toml"
+hyperkeyd_systemd_user_dir: "{{ hyperkeyd_home }}/.config/systemd/user"
+hyperkeyd_service_name: hyperkeyd.service
+hyperkeyd_service_path: "{{ hyperkeyd_systemd_user_dir }}/{{ hyperkeyd_service_name }}"
+hyperkeyd_xdg_runtime_dir: "/run/user/{{ ansible_facts['user_uid'] }}"
