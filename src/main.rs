@@ -815,12 +815,14 @@ fn executable_status(path: &Path) -> Result<ExecutableStatus> {
 
 /// Parse a key-code argument.
 ///
-/// `evdev::KeyCode` implements FromStr for canonical names such as `KEY_F24`.
-/// This helper adds friendly aliases:
+/// `evdev::KeyCode` implements FromStr for many canonical Linux names such as
+/// `KEY_F24`. This helper adds friendly aliases, numeric codes, and a narrow
+/// compatibility fallback for the kernel's newer KEY_MACRO1..KEY_MACRO30 range:
 ///
 /// - `F24` becomes `KEY_F24`
 /// - `LEFTMETA` becomes `KEY_LEFTMETA`
 /// - `CAPSLOCK` becomes `KEY_CAPSLOCK`
+/// - `KEY_MACRO11` maps to the Linux kernel code 0x29a (666)
 /// - `194` becomes `KeyCode::new(194)`
 fn parse_key_code(input: &str) -> std::result::Result<KeyCode, String> {
     let trimmed = input.trim();
@@ -840,8 +842,23 @@ fn parse_key_code(input: &str) -> std::result::Result<KeyCode, String> {
         format!("KEY_{upper}")
     };
 
-    KeyCode::from_str(&canonical)
-        .map_err(|err| format!("could not parse key code {input:?} as {canonical:?}: {err:?}"))
+    match KeyCode::from_str(&canonical) {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            if let Some(number) = canonical.strip_prefix("KEY_MACRO") {
+                if let Ok(number) = number.parse::<u16>() {
+                    if (1..=30).contains(&number) {
+                        const KEY_MACRO1_CODE: u16 = 0x290;
+                        return Ok(KeyCode::new(KEY_MACRO1_CODE + number - 1));
+                    }
+                }
+            }
+
+            Err(format!(
+                "could not parse key code {input:?} as {canonical:?}: {err:?}"
+            ))
+        }
+    }
 }
 
 /// Map evdev physical key codes to the command namespace.
@@ -934,18 +951,22 @@ mod tests {
     }
 
     #[test]
-    fn key_parser_accepts_canonical_names_and_aliases() {
+    fn key_parser_accepts_canonical_names_aliases_and_kernel_macro_names() {
         assert_eq!(parse_key_code("KEY_F24").unwrap(), KeyCode::KEY_F24);
         assert_eq!(parse_key_code("F24").unwrap(), KeyCode::KEY_F24);
         assert_eq!(parse_key_code("capslock").unwrap(), KeyCode::KEY_CAPSLOCK);
         assert_eq!(parse_key_code("666").unwrap(), KeyCode::new(666));
+        assert_eq!(parse_key_code("KEY_MACRO1").unwrap(), KeyCode::new(0x290));
+        assert_eq!(parse_key_code("KEY_MACRO11").unwrap(), KeyCode::new(0x29a));
+        assert_eq!(parse_key_code("macro30").unwrap(), KeyCode::new(0x2ad));
+        assert!(parse_key_code("KEY_MACRO31").is_err());
     }
 
     #[test]
     fn file_config_parses_machine_values() {
         let config: FileConfig = toml::from_str(
             r#"
-hyper_key = "666"
+hyper_key = "KEY_MACRO11"
 devices = [
     "/dev/input/by-id/hyper-device",
     "/dev/input/by-id/command-device",
@@ -954,7 +975,7 @@ devices = [
         )
         .unwrap();
 
-        assert_eq!(config.hyper_key, "666");
+        assert_eq!(config.hyper_key, "KEY_MACRO11");
         assert_eq!(config.devices.len(), 2);
         assert_eq!(config.script_dir, None);
     }
