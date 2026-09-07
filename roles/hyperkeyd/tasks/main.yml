@@ -2,7 +2,7 @@
 - name: Refuse a root-scoped personal install
   ansible.builtin.assert:
     that:
-      - ansible_user_id != 'root'
+      - ansible_facts['user_id'] != 'root'
     fail_msg: >-
       hyperkeyd is a per-user desktop service. Run this installer as the target
       desktop user rather than installing it into root's home directory.
