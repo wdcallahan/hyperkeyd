@@ -39,7 +39,7 @@
 //! the cost of needing permission to read `/dev/input/event*` devices.
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use evdev::{Device, EventSummary, KeyCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -75,6 +75,10 @@ const CHILD_REAPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
     long_about = None
 )]
 struct Args {
+    /// Run an interactive machine-specific helper.
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+
     /// Print evdev input devices and exit.
     ///
     /// Use this first to find the keyboard device path to pass to --device.
@@ -133,6 +137,12 @@ struct Args {
     /// testing command mappings before allowing scripts to run.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Interactively enroll the keyboard streams and Hyper key for this machine.
+    Setup,
 }
 
 /// Machine-specific values persisted by setup and consumed at runtime.
@@ -467,10 +477,20 @@ fn load_file_config(path: &Path) -> Result<FileConfig> {
         .with_context(|| format!("failed to parse config file {}", path.display()))
 }
 
+fn run_setup() -> Result<()> {
+    bail!("interactive setup enrollment is not implemented yet")
+}
+
 fn main() -> Result<()> {
     init_logging();
 
     let args = Args::parse();
+
+    if let Some(command) = args.command.as_ref() {
+        match command {
+            CliCommand::Setup => return run_setup(),
+        }
+    }
 
     if args.list_devices {
         list_devices();
@@ -948,6 +968,26 @@ mod tests {
         assert_eq!(normalize_extension("sh"), "sh");
         assert_eq!(normalize_extension(".sh"), "sh");
         assert_eq!(normalize_extension(""), "");
+    }
+
+    #[test]
+    fn setup_subcommand_coexists_with_existing_daemon_cli() {
+        let setup = Args::try_parse_from(["hyperkeyd", "setup"]).unwrap();
+        assert!(matches!(setup.command, Some(CliCommand::Setup)));
+
+        let daemon = Args::try_parse_from([
+            "hyperkeyd",
+            "--device",
+            "/dev/input/event7",
+            "--hyper-key",
+            "F24",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(daemon.command.is_none());
+        assert_eq!(daemon.device, vec![PathBuf::from("/dev/input/event7")]);
+        assert_eq!(daemon.hyper_key, Some(KeyCode::KEY_F24));
+        assert!(daemon.dry_run);
     }
 
     #[test]
