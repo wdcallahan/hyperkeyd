@@ -14,11 +14,18 @@ use evdev::{Device, EventSummary, KeyCode};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
 const INPUT_BY_ID: &str = "/dev/input/by-id";
+
+const BOLD_CYAN: &str = "1;36";
+const BOLD_GREEN: &str = "1;32";
+const BOLD_YELLOW: &str = "1;33";
+const BOLD_MAGENTA: &str = "1;35";
+const DIM: &str = "2";
 
 #[derive(Debug)]
 struct ObservedKeyPress {
@@ -91,39 +98,48 @@ pub fn run() -> Result<()> {
         bail!("no readable evdev devices that report key events were found");
     }
 
-    println!("hyperkeyd setup");
-    println!("Listening to {candidate_count} readable evdev key-event stream(s).");
-    println!("Press and release the physical key you want to use as Hyper.");
+    println!();
+    println!("{}", paint("◆ hyperkeyd setup", BOLD_CYAN));
+    println!(
+        "{}",
+        paint(
+            format!("  Found {candidate_count} readable evdev key-event stream(s)."),
+            DIM,
+        )
+    );
+
+    ui_section("1/3", "Choose the Hyper key");
+    ui_prompt("Press and release the physical key you want to use as Hyper.", "HYPER")?;
 
     let hyper = observe_press(None)?;
 
     println!();
-    println!("Observed Hyper candidate:");
+    ui_success("Hyper key detected.");
     print_observation(&hyper);
 
-    println!();
-    println!("Now press and release the physical A key.");
+    ui_section("2/3", "Find the command-key stream");
+    ui_prompt("Press and release the physical A key.", "A")?;
 
     let command = observe_press(Some(KeyCode::KEY_A))?;
 
     println!();
-    println!("Observed command-key stream:");
+    ui_success("Command-key stream detected.");
     print_observation(&command);
 
     println!();
     if hyper.device_path == command.device_path {
-        println!("Enrollment topology: Hyper and command keys share one evdev stream.");
+        ui_status("Topology", "Hyper and command keys share one evdev stream.");
     } else {
-        println!("Enrollment topology: Hyper and command keys use separate evdev streams.");
+        ui_status("Topology", "Hyper and command keys use separate evdev streams.");
     }
 
     let hyper_stable = stable_by_id_path(&hyper.device_path)?;
     let command_stable = stable_by_id_path(&command.device_path)?;
 
     println!();
-    println!("Stable device paths:");
-    println!("  Hyper:   {}", hyper_stable.display());
-    println!("  Command: {}", command_stable.display());
+    println!("{}", paint("Stable device paths", BOLD_CYAN));
+    println!("  Hyper   → {}", hyper_stable.display());
+    println!("  Command → {}", command_stable.display());
 
     let mut devices = vec![hyper_stable];
     if command_stable != devices[0] {
@@ -139,23 +155,42 @@ pub fn run() -> Result<()> {
         .context("failed to serialize enrollment configuration")?;
 
     println!();
-    println!("Configuration preview:");
+    println!("{}", paint("Configuration preview", BOLD_CYAN));
+    println!("{}", paint("────────────────────────────────────────", DIM));
     print!("{preview}");
+    println!("{}", paint("────────────────────────────────────────", DIM));
 
     let config_path = default_config_path()?;
-    println!();
+
+    ui_section("3/3", "Verify the enrollment");
     println!(
-        "On successful verification, setup will write {}.",
-        config_path.display()
+        "  On success, configuration will be written to:\n  {}",
+        paint(config_path.display().to_string(), BOLD_MAGENTA)
     );
-    println!("Verification: hold Hyper, press and release A, then release Hyper.");
+    println!();
+    println!("  Perform this chord in order:");
+    println!("    1. Hold {}", paint("HYPER", BOLD_MAGENTA));
+    println!("    2. Press and release {}", paint("A", BOLD_MAGENTA));
+    println!("    3. Release {}", paint("HYPER", BOLD_MAGENTA));
+    println!();
+    println!("{}", paint("▶ ACTION REQUIRED", BOLD_YELLOW));
+    println!("  Waiting for the complete Hyper+A chord…");
+    io::stdout()
+        .flush()
+        .context("failed to flush setup verification prompt")?;
+
     verify_hyper_a(&devices, hyper.key)?;
-    println!("Verification succeeded: the complete Hyper+A chord was observed on the selected stable device path(s).");
+
+    println!();
+    ui_success("Verification succeeded — complete Hyper+A chord observed.");
 
     write_config_atomic(&config_path, &config)?;
 
     println!();
-    println!("Configuration written atomically to {}.", config_path.display());
+    println!("{}", paint("✓ Setup complete", BOLD_GREEN));
+    println!("  Configuration written atomically to:");
+    println!("  {}", paint(config_path.display().to_string(), BOLD_MAGENTA));
+    println!();
 
     Ok(())
 }
@@ -252,10 +287,10 @@ fn verify_hyper_a(paths: &[PathBuf], hyper_key: KeyCode) -> Result<()> {
 }
 
 fn print_observation(observed: &ObservedKeyPress) {
-    println!("  device: {}", observed.device_path.display());
-    println!("  name: {}", observed.device_name);
-    println!("  keycode: {}", observed.key.code());
-    println!("  evdev: {:?}", observed.key);
+    println!("  device  → {}", observed.device_path.display());
+    println!("  name    → {}", observed.device_name);
+    println!("  keycode → {}", observed.key.code());
+    println!("  evdev   → {:?}", observed.key);
 }
 
 fn readable_key_devices() -> Vec<(PathBuf, Device)> {
@@ -358,6 +393,47 @@ fn write_config_atomic(path: &Path, config: &FileConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn ui_section(step: &str, title: &str) {
+    println!();
+    println!(
+        "{}",
+        paint(format!("━━━ {step} · {title} ━━━━━━━━━━━━━━━━━━━━━━━"), BOLD_CYAN)
+    );
+}
+
+fn ui_prompt(message: &str, key: &str) -> Result<()> {
+    println!();
+    println!("{}", paint("▶ ACTION REQUIRED", BOLD_YELLOW));
+    println!("  {message}");
+    println!("  Expected key: {}", paint(key, BOLD_MAGENTA));
+    println!("  {}", paint("Waiting for your keypress…", DIM));
+    io::stdout()
+        .flush()
+        .context("failed to flush setup key prompt")?;
+    Ok(())
+}
+
+fn ui_success(message: &str) {
+    println!("{} {message}", paint("✓", BOLD_GREEN));
+}
+
+fn ui_status(label: &str, message: &str) {
+    println!("{}: {message}", paint(label, BOLD_CYAN));
+}
+
+fn paint(text: impl AsRef<str>, ansi: &str) -> String {
+    let text = text.as_ref();
+    if color_enabled() {
+        format!("\x1b[{ansi}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn color_enabled() -> bool {
+    env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal()
 }
 
 #[cfg(test)]
