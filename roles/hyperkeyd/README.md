@@ -22,6 +22,22 @@ The role creates `~/.hyper` when missing but never enumerates, owns, edits, or d
 
 Keyboard identity remains machine-local state produced by `hyperkeyd setup`. Ansible preserves that state and points the service at it rather than duplicating keyboard policy in inventory or role variables.
 
+## Fresh installation
+
+On a machine with no existing enrollment, the first live playbook run installs the binary and user-service unit but deliberately leaves the service disabled and stopped. After the successful run, the final task tells the user to run:
+
+```bash
+~/.local/bin/hyperkeyd setup
+```
+
+Setup performs the interactive physical-key enrollment and writes the verified machine configuration. Then rerun:
+
+```bash
+ansible-playbook playbooks/install.yml
+```
+
+The second run sees the enrollment, enables and starts the service, and verifies that it reaches the `active` state.
+
 ## Variables
 
 All variables have current-user defaults and may be overridden by callers:
