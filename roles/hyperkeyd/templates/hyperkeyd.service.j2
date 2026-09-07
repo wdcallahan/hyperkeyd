@@ -1,0 +1,16 @@
+[Unit]
+Description=Hyper key command dispatcher
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=RUST_LOG=hyperkeyd=info
+ExecStart="{{ hyperkeyd_binary_path }}" --config "{{ hyperkeyd_config_path }}"
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+StandardInput=null
+
+[Install]
+WantedBy=default.target
