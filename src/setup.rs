@@ -163,18 +163,31 @@ pub fn run() -> Result<()> {
     let config_path = default_config_path()?;
 
     ui_section("3/3", "Verify the enrollment");
+    println!("  On success, configuration will be written to:");
+    println!("  {}", paint(config_path.display().to_string(), BOLD_MAGENTA));
+    println!();
+    println!("{}", paint("  DO THIS IN ORDER:", BOLD_YELLOW));
     println!(
-        "  On success, configuration will be written to:\n  {}",
-        paint(config_path.display().to_string(), BOLD_MAGENTA)
+        "  {}  {} {}",
+        paint("①", BOLD_CYAN),
+        paint("HOLD", BOLD_YELLOW),
+        paint("HYPER", BOLD_MAGENTA)
+    );
+    println!(
+        "  {}  {} {}",
+        paint("②", BOLD_CYAN),
+        paint("PRESS + RELEASE", BOLD_YELLOW),
+        paint("A", BOLD_MAGENTA)
+    );
+    println!(
+        "  {}  {} {}",
+        paint("③", BOLD_CYAN),
+        paint("RELEASE", BOLD_YELLOW),
+        paint("HYPER", BOLD_MAGENTA)
     );
     println!();
-    println!("  Perform this chord in order:");
-    println!("    1. Hold {}", paint("HYPER", BOLD_MAGENTA));
-    println!("    2. Press and release {}", paint("A", BOLD_MAGENTA));
-    println!("    3. Release {}", paint("HYPER", BOLD_MAGENTA));
-    println!();
     println!("{}", paint("▶ ACTION REQUIRED", BOLD_YELLOW));
-    println!("  Waiting for the complete Hyper+A chord…");
+    println!("  {}", paint("Waiting for the complete Hyper+A chord…", BOLD_YELLOW));
     io::stdout()
         .flush()
         .context("failed to flush setup verification prompt")?;
@@ -406,7 +419,7 @@ fn ui_section(step: &str, title: &str) {
 fn ui_prompt(message: &str, key: &str) -> Result<()> {
     println!();
     println!("{}", paint("▶ ACTION REQUIRED", BOLD_YELLOW));
-    println!("  {message}");
+    println!("  {}", paint(message, BOLD_YELLOW));
     println!("  Expected key: {}", paint(key, BOLD_MAGENTA));
     println!("  {}", paint("Waiting for your keypress…", DIM));
     io::stdout()
