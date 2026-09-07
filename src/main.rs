@@ -41,6 +41,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use evdev::{Device, EventSummary, KeyCode};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -53,7 +54,6 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-use serde::{Deserialize, Serialize};
 
 const DEVICE_RETRY_DELAY: Duration = Duration::from_secs(2);
 const CHILD_REAPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -86,19 +86,25 @@ struct Args {
     /// This option may be provided more than once. If several devices are
     /// supplied, Hyper state is shared across them. That means Hyper on one
     /// selected keyboard and `a` on another selected keyboard will dispatch
-    /// `a.sh`. For most personal setups, passing one keyboard is clearest.
+    /// `a.sh`. Explicit --device values override devices from --config.
     #[arg(short, long, value_name = "PATH")]
     device: Vec<PathBuf>,
+
     /// Read machine-specific keyboard configuration from this TOML file.
+    ///
+    /// Explicit command-line device, Hyper-key, and script-directory values
+    /// override the corresponding values from the file.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
     /// Evdev key code that acts as the Hyper trigger.
     ///
     /// Accepts names such as KEY_F24, F24, KEY_LEFTMETA, LEFTMETA, CAPSLOCK,
     /// or numeric codes like 194. Numeric codes are provided mostly as an
-    /// escape hatch for unusual keyboards.
-    #[arg(long, default_value = "KEY_F24", value_parser = parse_key_code)]
-    hyper_key: KeyCode,
+    /// escape hatch for unusual keyboards. Defaults to KEY_F24 when neither
+    /// the command line nor --config supplies a value.
+    #[arg(long, value_parser = parse_key_code)]
+    hyper_key: Option<KeyCode>,
 
     /// Directory containing command scripts.
     ///
@@ -129,16 +135,19 @@ struct Args {
     dry_run: bool,
 }
 
-/// Runtime configuration after command-line arguments have been normalized.
-///
-/// Keeping this separate from `Args` lets the rest of the program avoid
-/// repeatedly handling optional/default values.
+/// Machine-specific values persisted by setup and consumed at runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FileConfig {
     hyper_key: String,
     devices: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     script_dir: Option<PathBuf>,
 }
+
+/// Runtime configuration after command-line arguments have been normalized.
+///
+/// Keeping this separate from `Args` lets the rest of the program avoid
+/// repeatedly handling optional/default values.
 #[derive(Debug, Clone)]
 struct Config {
     hyper_key: KeyCode,
@@ -448,6 +457,8 @@ enum ExecutableStatus {
     NotAFile,
     NotExecutable,
 }
+
+/// Read and deserialize one machine-specific TOML configuration file.
 fn load_file_config(path: &Path) -> Result<FileConfig> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
@@ -455,6 +466,7 @@ fn load_file_config(path: &Path) -> Result<FileConfig> {
     toml::from_str(&contents)
         .with_context(|| format!("failed to parse config file {}", path.display()))
 }
+
 fn main() -> Result<()> {
     init_logging();
 
@@ -465,17 +477,47 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.device.is_empty() {
-        bail!("no input devices specified; run `hyperkeyd --list-devices`, then pass one or more --device PATH values");
+    let file_config = args
+        .config
+        .as_deref()
+        .map(load_file_config)
+        .transpose()?;
+
+    let devices = if args.device.is_empty() {
+        file_config
+            .as_ref()
+            .map(|config| config.devices.clone())
+            .unwrap_or_default()
+    } else {
+        args.device.clone()
+    };
+
+    if devices.is_empty() {
+        bail!("no input devices specified; pass one or more --device PATH values or provide devices in --config");
     }
 
-    let script_dir = match args.script_dir {
+    let hyper_key = match args.hyper_key {
+        Some(key) => key,
+        None => match file_config.as_ref() {
+            Some(config) => parse_key_code(&config.hyper_key)
+                .map_err(|err| anyhow::anyhow!("invalid hyper_key in config: {err}"))?,
+            None => KeyCode::KEY_F24,
+        },
+    };
+
+    let script_dir = match args.script_dir.clone() {
         Some(path) => path,
-        None => default_script_dir()?,
+        None => match file_config
+            .as_ref()
+            .and_then(|config| config.script_dir.clone())
+        {
+            Some(path) => path,
+            None => default_script_dir()?,
+        },
     };
 
     let config = Config {
-        hyper_key: args.hyper_key,
+        hyper_key,
         script_dir,
         extension: normalize_extension(&args.extension),
         log_missing: args.log_missing,
@@ -489,7 +531,7 @@ fn main() -> Result<()> {
     let mut handles = Vec::new();
     let mut seen_devices = HashSet::new();
 
-    for path in args.device {
+    for path in devices {
         if !seen_devices.insert(path.clone()) {
             warn!(device = %path.display(), "duplicate input device ignored");
             continue;
@@ -896,6 +938,25 @@ mod tests {
         assert_eq!(parse_key_code("KEY_F24").unwrap(), KeyCode::KEY_F24);
         assert_eq!(parse_key_code("F24").unwrap(), KeyCode::KEY_F24);
         assert_eq!(parse_key_code("capslock").unwrap(), KeyCode::KEY_CAPSLOCK);
+        assert_eq!(parse_key_code("666").unwrap(), KeyCode::new(666));
+    }
+
+    #[test]
+    fn file_config_parses_machine_values() {
+        let config: FileConfig = toml::from_str(
+            r#"
+hyper_key = "666"
+devices = [
+    "/dev/input/by-id/hyper-device",
+    "/dev/input/by-id/command-device",
+]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.hyper_key, "666");
+        assert_eq!(config.devices.len(), 2);
+        assert_eq!(config.script_dir, None);
     }
 
     #[test]
