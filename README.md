@@ -44,9 +44,15 @@ part of MACE's accepted keyboard state. Its generic default remains
 
 Nova's physical Hyper position now emits `PB_11`, which Linux exposes below
 XKB as `KEY_MACRO11`; XKB separately names the same transport `Hyper_L`. A
-test against the current board should therefore use
-`--hyper-key KEY_MACRO11`, because this daemon listens at evdev and never sees
-the later XKB keysym.
+test against the current board should therefore use `KEY_MACRO11`, because
+this daemon listens at evdev and never sees the later XKB keysym.
+
+The `evdev` crate version currently used by `hyperkeyd` does not yet assign a
+symbolic Rust constant to the kernel's newer `KEY_MACRO1` through
+`KEY_MACRO30` range. `hyperkeyd` therefore provides a narrow parser fallback
+for those canonical Linux names. `KEY_MACRO11` maps to kernel keycode `0x29a`
+(decimal `666`). The crate's debug formatter may still display that value as
+`unknown key: 666`; that display does not mean parsing failed.
 
 The canonical whole-system status and boundaries live in
 [`x1_keyboard_layout`](https://github.com/wdcallahan/x1_keyboard_layout):
@@ -92,7 +98,45 @@ For a systemd service, prefer a stable symlink under `/dev/input/by-id/` if your
 ls -l /dev/input/by-id/
 ```
 
-Then use that stable path with `--device`.
+Then use that stable path with `--device` or store it in a machine configuration file.
+
+## Machine configuration file
+
+Machine-specific keyboard enrollment can be stored in a TOML file and loaded with `--config`.
+
+A split-interface keyboard may need more than one evdev stream: one device can carry the Hyper transport while another carries ordinary command keys. List every required stable device path:
+
+```toml
+hyper_key = "KEY_MACRO11"
+devices = [
+    "/dev/input/by-id/usb-Keychron_Lemokey_X2-event-if01",
+    "/dev/input/by-id/usb-Keychron_Lemokey_X2-if01-event-kbd",
+]
+```
+
+With that file saved as `~/.config/hyperkeyd/config.toml`, run:
+
+```bash
+hyperkeyd --config ~/.config/hyperkeyd/config.toml
+```
+
+`script_dir` is optional. If it is omitted, `hyperkeyd` uses `$HOME/.hyper`:
+
+```toml
+hyper_key = "KEY_MACRO11"
+devices = ["/dev/input/by-id/example-keyboard-event-kbd"]
+script_dir = "/home/example/.hyper"
+```
+
+Paths in TOML are literal paths. `hyperkeyd` does **not** shell-expand `~` inside the file, so either omit `script_dir` to use the default or store an absolute path.
+
+Explicit command-line values override the corresponding file values:
+
+- one or more `--device` arguments replace the file's `devices` list;
+- `--hyper-key` replaces the file's `hyper_key`;
+- `--script-dir` replaces the file's `script_dir` or the default.
+
+If neither the command line nor the configuration file supplies a Hyper key, the generic runtime default remains `KEY_F24`.
 
 ## Basic test run
 
@@ -100,6 +144,12 @@ Start with `--dry-run` so no scripts are launched yet:
 
 ```bash
 RUST_LOG=hyperkeyd=debug hyperkeyd --device /dev/input/event7 --hyper-key KEY_F24 --dry-run
+```
+
+Or test a complete machine configuration:
+
+```bash
+RUST_LOG=hyperkeyd=debug hyperkeyd --config ~/.config/hyperkeyd/config.toml --dry-run
 ```
 
 Press and hold your configured Hyper key, then press `a`, `b`, or a digit. You should see log messages showing which script would have launched.
@@ -139,10 +189,16 @@ Then hold Hyper and press `a`.
 
 --device PATH
     Evdev device to read. May be passed more than once.
+    Explicit values replace devices from --config.
+
+--config PATH
+    Read machine-specific hyper_key, devices, and optional script_dir values
+    from a TOML file.
 
 --hyper-key KEY
-    Trigger key. Default: KEY_F24.
-    Examples: KEY_F24, F24, KEY_LEFTMETA, LEFTMETA, CAPSLOCK, 194.
+    Trigger key. Default: KEY_F24 when not supplied by --config.
+    Examples: KEY_F24, F24, KEY_LEFTMETA, LEFTMETA, CAPSLOCK,
+    KEY_MACRO11, 194, 666.
 
 --script-dir DIR
     Command script directory. Default: ~/.hyper.
@@ -206,7 +262,7 @@ mkdir -p ~/.config/systemd/user
 cp contrib/hyperkeyd.service ~/.config/systemd/user/hyperkeyd.service
 ```
 
-Edit the `ExecStart=` line so `--device` and `--hyper-key` match your system.
+The current template still passes machine-specific values on `ExecStart=`. Edit that line so `--device` and `--hyper-key` match your system. A later installer slice will migrate the managed service to `--config` after enrollment support is in place.
 
 Then enable it:
 
