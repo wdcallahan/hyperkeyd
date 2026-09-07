@@ -1,15 +1,19 @@
 # Example systemd --user service for hyperkeyd.
 #
-# Install as:
+# Before enabling this unit, run:
+#
+#   hyperkeyd setup
+#
+# to create ~/.config/hyperkeyd/config.toml with verified machine-specific
+# keyboard enrollment.
+#
+# Install manually as:
 #
 #   mkdir -p ~/.config/systemd/user
 #   cp contrib/hyperkeyd.service ~/.config/systemd/user/hyperkeyd.service
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now hyperkeyd.service
 #   journalctl --user -u hyperkeyd.service -f
-#
-# Before enabling, edit ExecStart so the --device path and --hyper-key match
-# your keyboard setup. Prefer stable /dev/input/by-id/ symlinks when available.
 
 [Unit]
 Description=Hyper key command dispatcher
@@ -19,7 +23,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 Environment=RUST_LOG=hyperkeyd=info
-ExecStart=%h/.local/bin/hyperkeyd --device /dev/input/by-id/REPLACE-ME-kbd --hyper-key KEY_F24 --script-dir %h/.hyper
+ExecStart=%h/.local/bin/hyperkeyd --config %h/.config/hyperkeyd/config.toml
 Restart=on-failure
 RestartSec=2s
 
