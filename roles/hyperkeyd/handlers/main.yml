@@ -1,0 +1,19 @@
+---
+- name: Reload hyperkeyd user systemd
+  ansible.builtin.systemd_service:
+    scope: user
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "{{ hyperkeyd_xdg_runtime_dir }}"
+
+- name: Restart hyperkeyd user service
+  ansible.builtin.systemd_service:
+    name: "{{ hyperkeyd_service_name }}"
+    scope: user
+    state: restarted
+  environment:
+    XDG_RUNTIME_DIR: "{{ hyperkeyd_xdg_runtime_dir }}"
+  when:
+    - hyperkeyd_existing_config.stat.isreg | default(false)
+    - (hyperkeyd_existing_config.stat.size | default(0) | int) > 0
+    - not ansible_check_mode or (hyperkeyd_service_before.stat.exists | default(false))
