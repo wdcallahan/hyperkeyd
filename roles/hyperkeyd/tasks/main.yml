@@ -52,11 +52,26 @@
     state: directory
     mode: '0755'
 
+- name: Ensure the systemd user-unit directory exists
+  ansible.builtin.file:
+    path: "{{ hyperkeyd_systemd_user_dir }}"
+    state: directory
+    mode: '0755'
+
 - name: Inspect existing machine enrollment configuration
   ansible.builtin.stat:
     path: "{{ hyperkeyd_config_path }}"
   register: hyperkeyd_existing_config
   changed_when: false
+
+- name: Reject an unusable machine enrollment file
+  ansible.builtin.assert:
+    that:
+      - not hyperkeyd_existing_config.stat.exists or (hyperkeyd_existing_config.stat.isreg | default(false))
+      - not hyperkeyd_existing_config.stat.exists or ((hyperkeyd_existing_config.stat.size | default(0) | int) > 0)
+    fail_msg: >-
+      {{ hyperkeyd_config_path }} exists but is not a non-empty regular file.
+      Re-run hyperkeyd setup to create a verified machine enrollment.
 
 - name: Report preservation of existing machine enrollment
   ansible.builtin.debug:
@@ -65,11 +80,19 @@
       this installer does not rewrite setup-generated configuration.
   when: hyperkeyd_existing_config.stat.exists
 
+- name: Report missing machine enrollment
+  ansible.builtin.debug:
+    msg: >-
+      No machine enrollment exists yet. The service unit will be installed but
+      will not be enabled or started until hyperkeyd setup has created
+      {{ hyperkeyd_config_path }} and the playbook is run again.
+  when: not hyperkeyd_existing_config.stat.exists
+
 - name: Explain binary handling in check mode
   ansible.builtin.debug:
     msg: >-
-      Check mode does not compile Rust or replace the installed binary. Directory
-      and configuration-preservation state is still evaluated normally.
+      Check mode does not compile Rust or replace the installed binary. Directory,
+      enrollment, unit-file, and existing service state are still evaluated.
   when: ansible_check_mode
 
 - name: Build the locked release binary
@@ -107,4 +130,61 @@
     dest: "{{ hyperkeyd_binary_path }}"
     remote_src: true
     mode: '0755'
+  notify: Restart hyperkeyd user service
   when: not ansible_check_mode
+
+- name: Inspect the currently installed user-service unit
+  ansible.builtin.stat:
+    path: "{{ hyperkeyd_service_path }}"
+  register: hyperkeyd_service_before
+  changed_when: false
+
+- name: Install the config-driven hyperkeyd user-service unit
+  ansible.builtin.template:
+    src: hyperkeyd.service.j2
+    dest: "{{ hyperkeyd_service_path }}"
+    mode: '0644'
+  notify:
+    - Reload hyperkeyd user systemd
+    - Restart hyperkeyd user service
+
+- name: Apply pending user-service handlers before service-state checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Explain prospective service handling in check mode
+  ansible.builtin.debug:
+    msg: >-
+      The managed unit does not exist yet, so check mode cannot ask systemd for
+      its future enabled/running state. A live run will daemon-reload and manage
+      the new unit after writing it.
+  when:
+    - ansible_check_mode
+    - hyperkeyd_existing_config.stat.isreg | default(false)
+    - (hyperkeyd_existing_config.stat.size | default(0) | int) > 0
+    - not (hyperkeyd_service_before.stat.exists | default(false))
+
+- name: Ensure the enrolled hyperkeyd user service is enabled and started
+  ansible.builtin.systemd_service:
+    name: "{{ hyperkeyd_service_name }}"
+    scope: user
+    enabled: true
+    state: started
+  environment:
+    XDG_RUNTIME_DIR: "{{ hyperkeyd_xdg_runtime_dir }}"
+  register: hyperkeyd_service_state
+  when:
+    - hyperkeyd_existing_config.stat.isreg | default(false)
+    - (hyperkeyd_existing_config.stat.size | default(0) | int) > 0
+    - not ansible_check_mode or (hyperkeyd_service_before.stat.exists | default(false))
+
+- name: Verify the managed hyperkeyd service is active
+  ansible.builtin.assert:
+    that:
+      - hyperkeyd_service_state.status.ActiveState | default('') == 'active'
+    fail_msg: >-
+      {{ hyperkeyd_service_name }} did not reach the active state after the
+      installer managed it.
+  when:
+    - not ansible_check_mode
+    - hyperkeyd_existing_config.stat.isreg | default(false)
+    - (hyperkeyd_existing_config.stat.size | default(0) | int) > 0
