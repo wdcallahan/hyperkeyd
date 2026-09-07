@@ -80,14 +80,6 @@
       this installer does not rewrite setup-generated configuration.
   when: hyperkeyd_existing_config.stat.exists
 
-- name: Report missing machine enrollment
-  ansible.builtin.debug:
-    msg: >-
-      No machine enrollment exists yet. The service unit will be installed but
-      will not be enabled or started until hyperkeyd setup has created
-      {{ hyperkeyd_config_path }} and the playbook is run again.
-  when: not hyperkeyd_existing_config.stat.exists
-
 - name: Explain binary handling in check mode
   ansible.builtin.debug:
     msg: >-
@@ -188,3 +180,20 @@
     - not ansible_check_mode
     - hyperkeyd_existing_config.stat.isreg | default(false)
     - (hyperkeyd_existing_config.stat.size | default(0) | int) > 0
+
+- name: Explain keyboard-enrollment next step
+  ansible.builtin.debug:
+    msg: |-
+      hyperkeyd is installed, but this machine has not been enrolled yet.
+
+      Next, run:
+        {{ hyperkeyd_binary_path }} setup
+
+      When setup succeeds, rerun:
+        ansible-playbook playbooks/install.yml
+
+      The service unit is installed but will remain disabled and stopped until
+      verified machine enrollment exists.
+  when:
+    - not ansible_check_mode
+    - not hyperkeyd_existing_config.stat.exists
