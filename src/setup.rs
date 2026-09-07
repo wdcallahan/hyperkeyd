@@ -41,6 +41,15 @@ struct VerificationEvent {
     value: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerificationProgress {
+    Waiting,
+    HyperHeld,
+    AReleased,
+    Reset,
+    Complete,
+}
+
 #[derive(Debug, Default)]
 struct VerificationState {
     hyper_devices: HashSet<PathBuf>,
@@ -49,29 +58,38 @@ struct VerificationState {
 }
 
 impl VerificationState {
-    fn observe(&mut self, event: VerificationEvent, hyper_key: KeyCode) -> bool {
+    fn observe(
+        &mut self,
+        event: VerificationEvent,
+        hyper_key: KeyCode,
+    ) -> VerificationProgress {
         if event.key == hyper_key {
             match event.value {
                 1 => {
+                    let was_unheld = self.hyper_devices.is_empty();
                     self.hyper_devices.insert(event.device_path);
+                    if was_unheld {
+                        return VerificationProgress::HyperHeld;
+                    }
                 }
                 0 => {
                     self.hyper_devices.remove(&event.device_path);
                     if self.hyper_devices.is_empty() {
                         if self.saw_a_press && self.saw_a_release {
-                            return true;
+                            return VerificationProgress::Complete;
                         }
 
                         // Hyper was released before a complete A press/release.
                         // Reset so the user can simply try the chord again.
                         self.saw_a_press = false;
                         self.saw_a_release = false;
+                        return VerificationProgress::Reset;
                     }
                 }
                 _ => {}
             }
 
-            return false;
+            return VerificationProgress::Waiting;
         }
 
         if event.key == KeyCode::KEY_A {
@@ -82,12 +100,13 @@ impl VerificationState {
                 }
                 0 if self.saw_a_press && !self.hyper_devices.is_empty() => {
                     self.saw_a_release = true;
+                    return VerificationProgress::AReleased;
                 }
                 _ => {}
             }
         }
 
-        false
+        VerificationProgress::Waiting
     }
 }
 
@@ -109,7 +128,10 @@ pub fn run() -> Result<()> {
     );
 
     ui_section("1/3", "Choose the Hyper key");
-    ui_prompt("Press and release the physical key you want to use as Hyper.", "HYPER")?;
+    ui_prompt(
+        "Press and release the physical key you want to use as Hyper.",
+        "HYPER",
+    )?;
 
     let hyper = observe_press(None)?;
 
@@ -130,7 +152,10 @@ pub fn run() -> Result<()> {
     if hyper.device_path == command.device_path {
         ui_status("Topology", "Hyper and command keys share one evdev stream.");
     } else {
-        ui_status("Topology", "Hyper and command keys use separate evdev streams.");
+        ui_status(
+            "Topology",
+            "Hyper and command keys use separate evdev streams.",
+        );
     }
 
     let hyper_stable = stable_by_id_path(&hyper.device_path)?;
@@ -151,8 +176,8 @@ pub fn run() -> Result<()> {
         devices: devices.clone(),
         script_dir: None,
     };
-    let preview = toml::to_string_pretty(&config)
-        .context("failed to serialize enrollment configuration")?;
+    let preview =
+        toml::to_string_pretty(&config).context("failed to serialize enrollment configuration")?;
 
     println!();
     println!("{}", paint("Configuration preview", BOLD_CYAN));
@@ -164,33 +189,10 @@ pub fn run() -> Result<()> {
 
     ui_section("3/3", "Verify the enrollment");
     println!("  On success, configuration will be written to:");
-    println!("  {}", paint(config_path.display().to_string(), BOLD_MAGENTA));
-    println!();
-    println!("{}", paint("  DO THIS IN ORDER:", BOLD_YELLOW));
     println!(
-        "  {}  {} {}",
-        paint("①", BOLD_CYAN),
-        paint("HOLD", BOLD_YELLOW),
-        paint("HYPER", BOLD_MAGENTA)
+        "  {}",
+        paint(config_path.display().to_string(), BOLD_MAGENTA)
     );
-    println!(
-        "  {}  {} {}",
-        paint("②", BOLD_CYAN),
-        paint("PRESS + RELEASE", BOLD_YELLOW),
-        paint("A", BOLD_MAGENTA)
-    );
-    println!(
-        "  {}  {} {}",
-        paint("③", BOLD_CYAN),
-        paint("RELEASE", BOLD_YELLOW),
-        paint("HYPER", BOLD_MAGENTA)
-    );
-    println!();
-    println!("{}", paint("▶ ACTION REQUIRED", BOLD_YELLOW));
-    println!("  {}", paint("Waiting for the complete Hyper+A chord…", BOLD_YELLOW));
-    io::stdout()
-        .flush()
-        .context("failed to flush setup verification prompt")?;
 
     verify_hyper_a(&devices, hyper.key)?;
 
@@ -202,7 +204,10 @@ pub fn run() -> Result<()> {
     println!();
     println!("{}", paint("✓ Setup complete", BOLD_GREEN));
     println!("  Configuration written atomically to:");
-    println!("  {}", paint(config_path.display().to_string(), BOLD_MAGENTA));
+    println!(
+        "  {}",
+        paint(config_path.display().to_string(), BOLD_MAGENTA)
+    );
     println!();
 
     Ok(())
@@ -255,8 +260,12 @@ fn observe_press(expected_key: Option<KeyCode>) -> Result<ObservedKeyPress> {
 fn verify_hyper_a(paths: &[PathBuf], hyper_key: KeyCode) -> Result<()> {
     let mut opened = Vec::new();
     for path in paths {
-        let device = Device::open(path)
-            .with_context(|| format!("failed to open stable enrollment device {}", path.display()))?;
+        let device = Device::open(path).with_context(|| {
+            format!(
+                "failed to open stable enrollment device {}",
+                path.display()
+            )
+        })?;
         opened.push((path.clone(), device));
     }
 
@@ -289,10 +298,43 @@ fn verify_hyper_a(paths: &[PathBuf], hyper_key: KeyCode) -> Result<()> {
 
     drop(tx);
 
+    ui_verification_prompt(
+        "Hold the Hyper key and keep holding it.",
+        "HYPER",
+    )?;
+
     let mut state = VerificationState::default();
     while let Ok(event) = rx.recv() {
-        if state.observe(event, hyper_key) {
-            return Ok(());
+        match state.observe(event, hyper_key) {
+            VerificationProgress::Waiting => {}
+            VerificationProgress::HyperHeld => {
+                println!();
+                ui_success("HYPER is held.");
+                ui_verification_prompt(
+                    "While still holding Hyper, press and release the A key.",
+                    "A",
+                )?;
+            }
+            VerificationProgress::AReleased => {
+                println!();
+                ui_success("A press and release detected.");
+                ui_verification_prompt("Release the Hyper key.", "HYPER")?;
+            }
+            VerificationProgress::Reset => {
+                println!();
+                println!(
+                    "{}",
+                    paint(
+                        "↻ Hyper was released before verification finished. Starting over.",
+                        BOLD_YELLOW,
+                    )
+                );
+                ui_verification_prompt(
+                    "Hold the Hyper key and keep holding it.",
+                    "HYPER",
+                )?;
+            }
+            VerificationProgress::Complete => return Ok(()),
         }
     }
 
@@ -389,8 +431,8 @@ fn write_config_atomic(path: &Path, config: &FileConfig) -> Result<()> {
     fs::create_dir_all(parent)
         .with_context(|| format!("failed to create config directory {}", parent.display()))?;
 
-    let contents = toml::to_string_pretty(config)
-        .context("failed to serialize enrollment configuration")?;
+    let contents =
+        toml::to_string_pretty(config).context("failed to serialize enrollment configuration")?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -412,7 +454,10 @@ fn ui_section(step: &str, title: &str) {
     println!();
     println!(
         "{}",
-        paint(format!("━━━ {step} · {title} ━━━━━━━━━━━━━━━━━━━━━━━"), BOLD_CYAN)
+        paint(
+            format!("━━━ {step} · {title} ━━━━━━━━━━━━━━━━━━━━━━━"),
+            BOLD_CYAN,
+        )
     );
 }
 
@@ -425,6 +470,19 @@ fn ui_prompt(message: &str, key: &str) -> Result<()> {
     io::stdout()
         .flush()
         .context("failed to flush setup key prompt")?;
+    Ok(())
+}
+
+fn ui_verification_prompt(message: &str, key: &str) -> Result<()> {
+    println!();
+    println!("{}", paint("▶ ACTION REQUIRED", BOLD_YELLOW));
+    println!("  {}", paint(message, BOLD_YELLOW));
+    println!("  Expected key: {}", paint(key, BOLD_MAGENTA));
+    println!("  {}", paint("No timeout — take your time.", DIM));
+    println!("  {}", paint("Waiting for this action…", DIM));
+    io::stdout()
+        .flush()
+        .context("failed to flush setup verification prompt")?;
     Ok(())
 }
 
@@ -479,10 +537,22 @@ mod tests {
         let hyper = KeyCode::KEY_F24;
         let mut state = VerificationState::default();
 
-        assert!(!state.observe(verification_event("/hyper", hyper, 1), hyper));
-        assert!(!state.observe(verification_event("/command", KeyCode::KEY_A, 1), hyper));
-        assert!(!state.observe(verification_event("/command", KeyCode::KEY_A, 0), hyper));
-        assert!(state.observe(verification_event("/hyper", hyper, 0), hyper));
+        assert_eq!(
+            state.observe(verification_event("/hyper", hyper, 1), hyper),
+            VerificationProgress::HyperHeld
+        );
+        assert_eq!(
+            state.observe(verification_event("/command", KeyCode::KEY_A, 1), hyper),
+            VerificationProgress::Waiting
+        );
+        assert_eq!(
+            state.observe(verification_event("/command", KeyCode::KEY_A, 0), hyper),
+            VerificationProgress::AReleased
+        );
+        assert_eq!(
+            state.observe(verification_event("/hyper", hyper, 0), hyper),
+            VerificationProgress::Complete
+        );
     }
 
     #[test]
@@ -490,14 +560,38 @@ mod tests {
         let hyper = KeyCode::KEY_F24;
         let mut state = VerificationState::default();
 
-        assert!(!state.observe(verification_event("/hyper", hyper, 1), hyper));
-        assert!(!state.observe(verification_event("/command", KeyCode::KEY_A, 1), hyper));
-        assert!(!state.observe(verification_event("/hyper", hyper, 0), hyper));
-        assert!(!state.observe(verification_event("/command", KeyCode::KEY_A, 0), hyper));
+        assert_eq!(
+            state.observe(verification_event("/hyper", hyper, 1), hyper),
+            VerificationProgress::HyperHeld
+        );
+        assert_eq!(
+            state.observe(verification_event("/command", KeyCode::KEY_A, 1), hyper),
+            VerificationProgress::Waiting
+        );
+        assert_eq!(
+            state.observe(verification_event("/hyper", hyper, 0), hyper),
+            VerificationProgress::Reset
+        );
+        assert_eq!(
+            state.observe(verification_event("/command", KeyCode::KEY_A, 0), hyper),
+            VerificationProgress::Waiting
+        );
 
-        assert!(!state.observe(verification_event("/hyper", hyper, 1), hyper));
-        assert!(!state.observe(verification_event("/command", KeyCode::KEY_A, 1), hyper));
-        assert!(!state.observe(verification_event("/command", KeyCode::KEY_A, 0), hyper));
-        assert!(state.observe(verification_event("/hyper", hyper, 0), hyper));
+        assert_eq!(
+            state.observe(verification_event("/hyper", hyper, 1), hyper),
+            VerificationProgress::HyperHeld
+        );
+        assert_eq!(
+            state.observe(verification_event("/command", KeyCode::KEY_A, 1), hyper),
+            VerificationProgress::Waiting
+        );
+        assert_eq!(
+            state.observe(verification_event("/command", KeyCode::KEY_A, 0), hyper),
+            VerificationProgress::AReleased
+        );
+        assert_eq!(
+            state.observe(verification_event("/hyper", hyper, 0), hyper),
+            VerificationProgress::Complete
+        );
     }
 }
