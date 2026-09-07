@@ -53,6 +53,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
+use serde::{Deserialize, Serialize};
 
 const DEVICE_RETRY_DELAY: Duration = Duration::from_secs(2);
 const CHILD_REAPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -88,7 +89,9 @@ struct Args {
     /// `a.sh`. For most personal setups, passing one keyboard is clearest.
     #[arg(short, long, value_name = "PATH")]
     device: Vec<PathBuf>,
-
+    /// Read machine-specific keyboard configuration from this TOML file.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
     /// Evdev key code that acts as the Hyper trigger.
     ///
     /// Accepts names such as KEY_F24, F24, KEY_LEFTMETA, LEFTMETA, CAPSLOCK,
@@ -130,6 +133,12 @@ struct Args {
 ///
 /// Keeping this separate from `Args` lets the rest of the program avoid
 /// repeatedly handling optional/default values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileConfig {
+    hyper_key: String,
+    devices: Vec<PathBuf>,
+    script_dir: Option<PathBuf>,
+}
 #[derive(Debug, Clone)]
 struct Config {
     hyper_key: KeyCode,
@@ -439,7 +448,13 @@ enum ExecutableStatus {
     NotAFile,
     NotExecutable,
 }
+fn load_file_config(path: &Path) -> Result<FileConfig> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config file {}", path.display()))?;
 
+    toml::from_str(&contents)
+        .with_context(|| format!("failed to parse config file {}", path.display()))
+}
 fn main() -> Result<()> {
     init_logging();
 
