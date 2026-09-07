@@ -84,6 +84,30 @@ Install it somewhere in your user path, for example:
 install -Dm755 target/release/hyperkeyd ~/.local/bin/hyperkeyd
 ```
 
+## Install with Ansible
+
+The repository includes a local Ansible installer for the current desktop user:
+
+```bash
+ansible-playbook playbooks/install.yml
+```
+
+The installer builds the locked release binary, installs it under `~/.local/bin`, creates the required user directories, installs the config-driven systemd user unit, and preserves any existing machine enrollment at `~/.config/hyperkeyd/config.toml`.
+
+On a fresh machine with no enrollment yet, the first playbook run installs the binary and unit but deliberately leaves the service disabled and stopped. At the successful end of the run it tells you to enroll the keyboard:
+
+```bash
+~/.local/bin/hyperkeyd setup
+```
+
+After setup succeeds, rerun:
+
+```bash
+ansible-playbook playbooks/install.yml
+```
+
+The second run sees the verified machine configuration, enables and starts `hyperkeyd.service`, and verifies that the managed user service reaches the active state. Existing command scripts under `~/.hyper` are never enumerated, edited, or deleted by the role.
+
 ## Enroll a keyboard
 
 The normal machine-enrollment path is the interactive setup wizard:
@@ -304,28 +328,29 @@ A udev-rule example is provided in:
 contrib/72-hyperkeyd-keyboard.rules.example
 ```
 
-A template service is provided in:
+A config-driven template service is provided in:
 
 ```text
 contrib/hyperkeyd.service
 ```
 
-Copy it to:
+For manual installation, first create a verified machine configuration with:
+
+```bash
+hyperkeyd setup
+```
+
+Then install and enable the unit:
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp contrib/hyperkeyd.service ~/.config/systemd/user/hyperkeyd.service
-```
-
-The current template still passes machine-specific values on `ExecStart=`. Edit that line so `--device` and `--hyper-key` match your system. The installer slice will migrate the managed service to `--config` while preserving machine-local enrollment.
-
-Then enable it:
-
-```bash
 systemctl --user daemon-reload
 systemctl --user enable --now hyperkeyd.service
 journalctl --user -u hyperkeyd.service -f
 ```
+
+The service reads machine-specific keyboard identity from `~/.config/hyperkeyd/config.toml`; it does not duplicate device paths or Hyper keycodes in `ExecStart=`.
 
 ## Design boundaries
 
