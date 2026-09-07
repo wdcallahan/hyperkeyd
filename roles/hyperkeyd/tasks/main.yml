@@ -1,0 +1,110 @@
+---
+- name: Refuse a root-scoped personal install
+  ansible.builtin.assert:
+    that:
+      - ansible_user_id != 'root'
+    fail_msg: >-
+      hyperkeyd is a per-user desktop service. Run this installer as the target
+      desktop user rather than installing it into root's home directory.
+
+- name: Inspect required Cargo project files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ hyperkeyd_source_dir }}/Cargo.toml"
+    - "{{ hyperkeyd_source_dir }}/Cargo.lock"
+  register: hyperkeyd_source_files
+  changed_when: false
+
+- name: Require the expected hyperkeyd source checkout
+  ansible.builtin.assert:
+    that:
+      - hyperkeyd_source_files.results | length == 2
+      - hyperkeyd_source_files.results[0].stat.isreg | default(false)
+      - hyperkeyd_source_files.results[1].stat.isreg | default(false)
+    fail_msg: >-
+      hyperkeyd_source_dir must point at a checkout containing Cargo.toml and
+      Cargo.lock.
+
+- name: Verify Cargo is available
+  ansible.builtin.command:
+    argv:
+      - cargo
+      - --version
+  register: hyperkeyd_cargo_version
+  changed_when: false
+  check_mode: false
+
+- name: Ensure the user-local binary directory exists
+  ansible.builtin.file:
+    path: "{{ hyperkeyd_install_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Ensure the Hyper command directory exists without managing its contents
+  ansible.builtin.file:
+    path: "{{ hyperkeyd_script_dir }}"
+    state: directory
+
+- name: Ensure the hyperkeyd configuration directory exists
+  ansible.builtin.file:
+    path: "{{ hyperkeyd_config_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Inspect existing machine enrollment configuration
+  ansible.builtin.stat:
+    path: "{{ hyperkeyd_config_path }}"
+  register: hyperkeyd_existing_config
+  changed_when: false
+
+- name: Report preservation of existing machine enrollment
+  ansible.builtin.debug:
+    msg: >-
+      Existing machine enrollment at {{ hyperkeyd_config_path }} is preserved;
+      this installer does not rewrite setup-generated configuration.
+  when: hyperkeyd_existing_config.stat.exists
+
+- name: Explain binary handling in check mode
+  ansible.builtin.debug:
+    msg: >-
+      Check mode does not compile Rust or replace the installed binary. Directory
+      and configuration-preservation state is still evaluated normally.
+  when: ansible_check_mode
+
+- name: Build the locked release binary
+  ansible.builtin.command:
+    argv:
+      - cargo
+      - build
+      - --release
+      - --locked
+    chdir: "{{ hyperkeyd_source_dir }}"
+  register: hyperkeyd_build
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Inspect the compiled release binary
+  ansible.builtin.stat:
+    path: "{{ hyperkeyd_source_dir }}/target/release/hyperkeyd"
+  register: hyperkeyd_compiled_binary
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Require a compiled release binary
+  ansible.builtin.assert:
+    that:
+      - hyperkeyd_compiled_binary.stat.isreg | default(false)
+      - hyperkeyd_compiled_binary.stat.executable | default(false)
+    fail_msg: >-
+      cargo build completed without producing an executable
+      target/release/hyperkeyd binary.
+  when: not ansible_check_mode
+
+- name: Install hyperkeyd into the user-local binary directory
+  ansible.builtin.copy:
+    src: "{{ hyperkeyd_source_dir }}/target/release/hyperkeyd"
+    dest: "{{ hyperkeyd_binary_path }}"
+    remote_src: true
+    mode: '0755'
+  when: not ansible_check_mode
