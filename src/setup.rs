@@ -4,12 +4,14 @@
 //!
 //! Setup deliberately observes evdev passively, just like the daemon. It
 //! discovers the actual Hyper and command-key streams from physical presses,
-//! then resolves the volatile `/dev/input/eventN` paths to stable
-//! `/dev/input/by-id/` symlinks. Configuration is still preview-only at this
-//! checkpoint; persistence and verification come later.
+//! resolves the volatile `/dev/input/eventN` paths to stable
+//! `/dev/input/by-id/` symlinks, then verifies the resulting Hyper+A combination
+//! using only those stable paths. Configuration is still preview-only at this
+//! checkpoint; persistence comes after verification is proven on real hardware.
 
 use anyhow::{bail, Context, Result};
 use evdev::{Device, EventSummary, KeyCode};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -22,6 +24,13 @@ struct ObservedKeyPress {
     device_path: PathBuf,
     device_name: String,
     key: KeyCode,
+}
+
+#[derive(Debug)]
+struct VerificationEvent {
+    device_path: PathBuf,
+    key: KeyCode,
+    value: i32,
 }
 
 pub fn run() -> Result<()> {
@@ -80,6 +89,12 @@ pub fn run() -> Result<()> {
         println!("    {:?},", device.display().to_string());
     }
     println!("]");
+
+    println!();
+    println!("Verification: hold Hyper, press and release A, then release Hyper.");
+    verify_hyper_a(&devices, hyper.key)?;
+    println!("Verification succeeded: Hyper+A was observed on the selected stable device path(s).");
+
     println!();
     println!("No configuration has been written yet.");
 
@@ -128,6 +143,66 @@ fn observe_press(expected_key: Option<KeyCode>) -> Result<ObservedKeyPress> {
 
     rx.recv()
         .context("all candidate input streams closed before the requested key press was observed")
+}
+
+fn verify_hyper_a(paths: &[PathBuf], hyper_key: KeyCode) -> Result<()> {
+    let mut opened = Vec::new();
+    for path in paths {
+        let device = Device::open(path)
+            .with_context(|| format!("failed to open stable enrollment device {}", path.display()))?;
+        opened.push((path.clone(), device));
+    }
+
+    let (tx, rx) = mpsc::channel::<VerificationEvent>();
+
+    for (path, mut device) in opened {
+        let tx = tx.clone();
+        thread::spawn(move || loop {
+            let events = match device.fetch_events() {
+                Ok(events) => events,
+                Err(_) => return,
+            };
+
+            for event in events {
+                if let EventSummary::Key(_, key, value) = event.destructure() {
+                    if tx
+                        .send(VerificationEvent {
+                            device_path: path.clone(),
+                            key,
+                            value,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    drop(tx);
+
+    let mut hyper_devices = HashSet::new();
+    while let Ok(event) = rx.recv() {
+        if event.key == hyper_key {
+            match event.value {
+                1 => {
+                    hyper_devices.insert(event.device_path);
+                }
+                0 => {
+                    hyper_devices.remove(&event.device_path);
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if event.key == KeyCode::KEY_A && event.value == 1 && !hyper_devices.is_empty() {
+            return Ok(());
+        }
+    }
+
+    bail!("all selected stable input streams closed before Hyper+A verification succeeded")
 }
 
 fn print_observation(observed: &ObservedKeyPress) {
