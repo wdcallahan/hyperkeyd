@@ -1,0 +1,8 @@
+---
+hyperkeyd_source_dir: "{{ playbook_dir | dirname }}"
+hyperkeyd_home: "{{ ansible_user_dir }}"
+hyperkeyd_install_dir: "{{ hyperkeyd_home }}/.local/bin"
+hyperkeyd_binary_path: "{{ hyperkeyd_install_dir }}/hyperkeyd"
+hyperkeyd_script_dir: "{{ hyperkeyd_home }}/.hyper"
+hyperkeyd_config_dir: "{{ hyperkeyd_home }}/.config/hyperkeyd"
+hyperkeyd_config_path: "{{ hyperkeyd_config_dir }}/config.toml"
